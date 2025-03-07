@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 LED                 = 4
 GYROSCOPE_ADDR      = 0x69
-I2C_TIMER           = 0.01
+I2C_TIMER           = 0.1
 BIT_8_MASK          = 0xFF
 BIT_16_MASK         = 0xFFFF
 MAX_OFFSET_SAMPLES  = 1000
@@ -31,10 +31,33 @@ i2c = smbus.SMBus(1)
 
 
 @dataclass
+class GyroMeta:
+    id: str
+
+
+
+@dataclass
 class GyroData:
     x: int
     y: int
     z: int
+
+
+# Enumeration for the different angular rate options
+class GyroAngularRange(Enum):
+    GYRO_RANGE_2000 = 0x00
+    GYRO_RANGE_1000 = 0x01
+    GYRO_RANGE_500  = 0x02
+    GYRO_RANGE_250  = 0x03
+    GYRO_RANGE_125  = 0x04
+
+
+# Enumeration for the different output rate options
+class GyroOutputRate(Enum):
+    GYRO_RATE_25    = 0b0110
+    GYRO_RATE_100   = 0b1000
+    GYRO_RATE_1600  = 0b1100
+    GYRO_RATE_3200  = 0b1101
 
 
 # Enum with all important register addresses
@@ -57,6 +80,10 @@ class BMI160Registers(Enum):
     GYROSCOPE_RANGE     = 0x43  # Angular range of the gyro
 
     # interrupt registers
+
+
+    # FIFO registers
+    FIFO_DOWNS          = 0x45
 
 
 class GyroscopeNode(Node):
@@ -91,6 +118,12 @@ class GyroscopeNode(Node):
 
         time.sleep(0.001) # Sleep for 1 milisecond
 
+        # set the range
+        self.set_gyro_range(GyroAngularRange.GYRO_RANGE_2000)
+
+        # Set the output rate
+        self.set_gyro_output_rate(GyroOutputRate.GYRO_RATE_1600)
+
         self.calibration_process()
 
         print("Finished initializing gyroscope!")
@@ -104,6 +137,8 @@ class GyroscopeNode(Node):
             self.gyro_offset_x += data.x
             self.gyro_offset_y += data.y
             self.gyro_offset_z += data.z
+
+            print(f"Training data: {data}")
 
         self.gyro_offset_x = self.gyro_offset_x / MAX_OFFSET_SAMPLES
         self.gyro_offset_y = self.gyro_offset_y / MAX_OFFSET_SAMPLES
@@ -140,9 +175,9 @@ class GyroscopeNode(Node):
         gd = GyroData(0, 0, 0)
 
         # Resolution of the gyro is 16 bit, make sure with the mask that it is 16 bit
-        gd.x = ((x_msb<<8) | x_lsb) & BIT_16_MASK
-        gd.y = ((y_msb<<8) | y_lsb) & BIT_16_MASK 
-        gd.z = ((z_msb<<8) | z_lsb) & BIT_16_MASK
+        gd.x = ((x_msb<<7) | x_lsb) & BIT_16_MASK
+        gd.y = ((y_msb<<7) | y_lsb) & BIT_16_MASK 
+        gd.z = ((z_msb<<7) | z_lsb) & BIT_16_MASK
 
         if enable_offset:
             gd.x -= self.gyro_offset_x
@@ -150,6 +185,16 @@ class GyroscopeNode(Node):
             gd.z -= self.gyro_offset_z
 
         return gd
+
+
+    # Method to set the output rate of the gyroscope
+    def set_gyro_output_rate(self, rate: GyroOutputRate):
+        i2c.write_byte_data(GYROSCOPE_ADDR, BMI160Registers.GYROSCOPE_CONF.value, rate.value)
+
+
+    # Method to set the range in which the gyro samples
+    def set_gyro_range(self, range: GyroAngularRange):
+        i2c.write_byte_data(GYROSCOPE_ADDR, BMI160Registers.GYROSCOPE_RANGE.value, range.value)
 
 
 def main(args=None):
