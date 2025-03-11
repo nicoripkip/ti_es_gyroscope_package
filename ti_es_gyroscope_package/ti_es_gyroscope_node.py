@@ -7,8 +7,12 @@ from enum import Enum
 from dataclasses import dataclass
 
 
+from std_msgs.msg import String
+
+
+# Settings
 LED                 = 4
-GYROSCOPE_ADDR      = 0x69
+MUL_ADDR            = 0x70 # TODO: Set this value to parameter
 I2C_TIMER           = 0.1
 BIT_8_MASK          = 0xFF
 BIT_16_MASK         = 0xFFFF
@@ -18,22 +22,12 @@ SCALE_CORRECTION    = 0
 
 h = lgpio.gpiochip_open(0)
 lgpio.gpio_claim_output(h, LED)
-
 i2c = smbus.SMBus(1)
-
-# Registers of the Gyroscope
-# 0x0C - X
-# 0x0D - X
-# 0x0E - Y
-# 0x0F - Y
-# 0x10 - Z
-# 0x11 - Z
 
 
 @dataclass
 class GyroMeta:
     id: str
-
 
 
 @dataclass
@@ -54,10 +48,10 @@ class GyroAngularRange(Enum):
 
 # Enumeration for the different output rate options
 class GyroOutputRate(Enum):
-    GYRO_RATE_25    = 0b0110
-    GYRO_RATE_100   = 0b1000
-    GYRO_RATE_1600  = 0b1100
-    GYRO_RATE_3200  = 0b1101
+    GYRO_RATE_25    = 0x06 #0b0110
+    GYRO_RATE_100   = 0x08 #0b1000
+    GYRO_RATE_1600  = 0x0C #0b1100
+    GYRO_RATE_3200  = 0x0D #0b1101
 
 
 # Enum with all important register addresses
@@ -92,10 +86,35 @@ class GyroscopeNode(Node):
 
         self.state = 0
 
+        # Multiplexer address config
+        # | A0 | A1 | A2 |
+        # ----------------
+        # | HH | LL | LL | address: 0x74, position: 1
+        # | LL | HH | LL | address: 0x72, position: 2
+        # | LL | LL | HH | address: 0x71, position: 3
+
+        # Declare parameters
+        self.declare_parameter("gyro_address", 0x00)
+        self.declare_parameter("mul_address", 0x00)
+        self.declare_parameter("mul_channel", 0)
+        self.declare_parameter("mul_enable", False)
+
+        # Define parameters for the node
+        self.gyro_address   = self.get_parameter("gyro_address").value        # Use this one if there is no multiplexer used
+        self.mul_address    = self.get_parameter("mul_address").value     # Use this one if multiplexer is used
+        self.mul_enable     = self.get_parameter("mul_enable").value
+        self.mul_channel    = self.get_parameter("mul_channel").value
+  
+        # Setup the publisher command
+        self.gyro_publisher = self.create_publisher(String, "ti/es/gyro_data", 10)
+        self.log_publisher  = self.create_publisher(String, "ti/es/log_data", 10)
+
+        # Define gyro offset values for calibration
         self.gyro_offset_x = 0
         self.gyro_offset_y = 0
         self.gyro_offset_z = 0
 
+        # Enable looptimer
         self.timer = self.create_timer(I2C_TIMER, self.timer_callback)
 
         self.init_gyroscope()
@@ -103,18 +122,26 @@ class GyroscopeNode(Node):
 
     # Method to setup the config for the gyroscope
     def init_gyroscope(self):
+        log_msg = String()
+        log_msg.data = f"[][info][gyroscope] Trying to find offsets for the gyroscope sensor!"
+
+        self.log_publisher.publish(log_msg)
+
+        if self.mul_enable:
+            self.select_mul_channel(self.mul_channel)
+
         # Set accelerometer in low power mode
-        i2c.write_byte_data(GYROSCOPE_ADDR, BMI160Registers.COMMAND_REGISTER.value, 0x12)
+        i2c.write_byte_data(self.gyro_address, BMI160Registers.COMMAND_REGISTER.value, 0x12)
 
         time.sleep(0.004)   # Sleep for 4 miliseconds
 
         # Set gyroscope in normal mode
-        i2c.write_byte_data(GYROSCOPE_ADDR, BMI160Registers.COMMAND_REGISTER.value, 0x15)
+        i2c.write_byte_data(self.gyro_address, BMI160Registers.COMMAND_REGISTER.value, 0x15)
 
         time.sleep(0.080)   # Sleep for 80 miliseconds
 
         # Set magneto meter into suspend mode
-        i2c.write_byte_data(GYROSCOPE_ADDR, BMI160Registers.COMMAND_REGISTER.value, 0x1B)
+        i2c.write_byte_data(self.gyro_address, BMI160Registers.COMMAND_REGISTER.value, 0x1B)
 
         time.sleep(0.001) # Sleep for 1 milisecond
 
@@ -129,6 +156,9 @@ class GyroscopeNode(Node):
         print("Finished initializing gyroscope!")
 
 
+    # Method for calibrating the data from the gyroscope
+    # This process always happen on boot, but it can also
+    # be done later in the process
     def calibration_process(self):
         # collect offset samples and determine the bias
         for i in range(0, MAX_OFFSET_SAMPLES):
@@ -149,23 +179,31 @@ class GyroscopeNode(Node):
 
     # Timer callback that periodicly checks if there are values ready from the sensor
     def timer_callback(self):
-        # lgpio.gpio_write(h, LED, self.state)
-        # self.state = not self.state
+        # If mul enabled, alwats first select the channel
+        if self.mul_enable:
+            self.select_mul_channel(self.mul_channel)
 
+        # Take a reading from the gyro
         data = self.read_data_from_gyro()
+
+        log_msg = String()
+        log_msg.data = f"Gyro data: {data}"
+
+        self.log_publisher.publish(log_msg)
 
         print(f"Gyro data: {data}")
         print(f"Offset x: {self.gyro_offset_x}, Offset y: {self.gyro_offset_y}, Offset z: {self.gyro_offset_z}")
 
 
+    # Read data from the gyroscope sensor
     def read_data_from_gyro(self, enable_offset = True):
         # Trying to read 1 byte from the gyroscope and mask the value to make sure it´s 8bit
-        x_lsb = i2c.read_byte_data(GYROSCOPE_ADDR, BMI160Registers.GYROSCOPE_X_LSB.value) & BIT_8_MASK
-        x_msb = i2c.read_byte_data(GYROSCOPE_ADDR, BMI160Registers.GYROSCOPE_X_MSB.value) & BIT_8_MASK
-        y_lsb = i2c.read_byte_data(GYROSCOPE_ADDR, BMI160Registers.GYROSCOPE_Y_LSB.value) & BIT_8_MASK
-        y_msb = i2c.read_byte_data(GYROSCOPE_ADDR, BMI160Registers.GYROSCOPE_Y_MSB.value) & BIT_8_MASK
-        z_lsb = i2c.read_byte_data(GYROSCOPE_ADDR, BMI160Registers.GYROSCOPE_Z_LSB.value) & BIT_8_MASK
-        z_msb = i2c.read_byte_data(GYROSCOPE_ADDR, BMI160Registers.GYROSCOPE_Z_MSB.value) & BIT_8_MASK
+        x_lsb = i2c.read_byte_data(self.gyro_address, BMI160Registers.GYROSCOPE_X_LSB.value) & BIT_8_MASK
+        x_msb = i2c.read_byte_data(self.gyro_address, BMI160Registers.GYROSCOPE_X_MSB.value) & BIT_8_MASK
+        y_lsb = i2c.read_byte_data(self.gyro_address, BMI160Registers.GYROSCOPE_Y_LSB.value) & BIT_8_MASK
+        y_msb = i2c.read_byte_data(self.gyro_address, BMI160Registers.GYROSCOPE_Y_MSB.value) & BIT_8_MASK
+        z_lsb = i2c.read_byte_data(self.gyro_address, BMI160Registers.GYROSCOPE_Z_LSB.value) & BIT_8_MASK
+        z_msb = i2c.read_byte_data(self.gyro_address, BMI160Registers.GYROSCOPE_Z_MSB.value) & BIT_8_MASK
 
         return self.construct_gyro_data(x_lsb, x_msb, y_lsb, y_msb, z_lsb, z_msb, enable_offset)
 
@@ -187,14 +225,24 @@ class GyroscopeNode(Node):
         return gd
 
 
+    # Method to configure the channel for the multiplexer, choose between channel 1-8
+    def select_mul_channel(self, channel: int):
+        # Make sure channel is always 7 or smaller
+        if channel > 7:
+            channel = 7
+
+        # Set the channel
+        i2c.write_byte_data(self.mul_address, 0x00, (1 << (channel)-1) & BIT_8_MASK)
+
+
     # Method to set the output rate of the gyroscope
     def set_gyro_output_rate(self, rate: GyroOutputRate):
-        i2c.write_byte_data(GYROSCOPE_ADDR, BMI160Registers.GYROSCOPE_CONF.value, rate.value)
+        i2c.write_byte_data(self.gyro_address, BMI160Registers.GYROSCOPE_CONF.value, rate.value)
 
 
     # Method to set the range in which the gyro samples
     def set_gyro_range(self, range: GyroAngularRange):
-        i2c.write_byte_data(GYROSCOPE_ADDR, BMI160Registers.GYROSCOPE_RANGE.value, range.value)
+        i2c.write_byte_data(self.gyro_address, BMI160Registers.GYROSCOPE_RANGE.value, range.value)
 
 
 def main(args=None):
