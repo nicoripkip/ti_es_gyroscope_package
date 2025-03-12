@@ -20,8 +20,7 @@ MAX_OFFSET_SAMPLES  = 1000
 SCALE_CORRECTION    = 0
 
 
-h = lgpio.gpiochip_open(0)
-lgpio.gpio_claim_output(h, LED)
+# Setup i2c
 i2c = smbus.SMBus(1)
 
 
@@ -117,7 +116,10 @@ class GyroscopeNode(Node):
         # Enable looptimer
         self.timer = self.create_timer(I2C_TIMER, self.timer_callback)
 
-        self.init_gyroscope()
+        try:
+            self.init_gyroscope()
+        except:
+            pass
 
 
     # Method to setup the config for the gyroscope
@@ -168,6 +170,9 @@ class GyroscopeNode(Node):
             self.gyro_offset_y += data.y
             self.gyro_offset_z += data.z
 
+            with open("training_data.txt", "a") as f:
+                f.write(f"{data.x}, {data.y}, {data.z}\n")
+
             print(f"Training data: {data}")
 
         self.gyro_offset_x = self.gyro_offset_x / MAX_OFFSET_SAMPLES
@@ -184,15 +189,22 @@ class GyroscopeNode(Node):
             self.select_mul_channel(self.mul_channel)
 
         # Take a reading from the gyro
-        data = self.read_data_from_gyro()
+        try:
+            data = self.read_data_from_gyro()
 
-        log_msg = String()
-        log_msg.data = f"Gyro data: {data}"
+            log_msg = String()
+            log_msg.data = f"Gyro data: {data}"
 
-        self.log_publisher.publish(log_msg)
+            self.log_publisher.publish(log_msg)
 
-        print(f"Gyro data: {data}")
-        print(f"Offset x: {self.gyro_offset_x}, Offset y: {self.gyro_offset_y}, Offset z: {self.gyro_offset_z}")
+            print(f"Gyro data: {data}")
+            print(f"Offset x: {self.gyro_offset_x}, Offset y: {self.gyro_offset_y}, Offset z: {self.gyro_offset_z}")
+        except:
+            pass
+
+        # Set the selected channel back to zero
+        if self.mul_enable:
+            self.reset_mul_channel()
 
 
     # Read data from the gyroscope sensor
@@ -233,6 +245,11 @@ class GyroscopeNode(Node):
 
         # Set the channel
         i2c.write_byte_data(self.mul_address, 0x00, (1 << (channel)-1) & BIT_8_MASK)
+
+
+    # Method to reset the selected channel on the multiplexer
+    def reset_mul_channel(self):
+        i2c.write_byte_data(self.mul_address, 0x00, 0x00)
 
 
     # Method to set the output rate of the gyroscope
